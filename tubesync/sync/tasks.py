@@ -1257,12 +1257,8 @@ def refresh_formats(media_id):
         save, retry, msg = media.refresh_formats()
         if save is not True:
             log.warning(f'Refreshing formats for "{media.key}" failed: {msg}')
-            exc = CancelExecution(
-                _('failed to refresh formats for:'),
-                f'{media.key} / {media.uuid}:',
-                msg,
-                retry=retry,
-            )
+            msg_arg = _('failed to refresh formats for:') + f'{media.key} / {media.uuid}: {msg}'
+            exc = CancelExecution(msg=msg_arg, retry=retry)
             # combine the strings
             exc.args = (' '.join(map(str, exc.args)),)
             # store instance details
