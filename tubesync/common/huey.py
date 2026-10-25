@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import concurrent.futures
 import datetime
 import subprocess
 import threading
@@ -537,7 +536,7 @@ def register_huey_signals():
                 q.get(peek=False, key=result_key)
                 q.get(peek=False, key=key)
 
-    def _run_cleanup(qn):
+    def _create_cleanup_worker(qn):
         def _target():
             try:
                 prune_queue_storage(qn)
@@ -549,12 +548,9 @@ def register_huey_signals():
         # short running tasks won't start these threads.
         worker = threading.Thread(target=_target, daemon=True)
         worker.queue_name = qn
-        threads.add(worker)
+        return worker
 
     queues = { qn: get_queue(qn) for qn in DJANGO_HUEY.get('queues', dict()) }
-    executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=get_usable_cpu_count(),
-    )
     threads = set()
     for qn, q in queues.items():
         # hooks to clean up database connections at task boundaries
@@ -566,12 +562,8 @@ def register_huey_signals():
         signal(queue=qn)(historical_task)
         signal(signals.SIGNAL_EXECUTING, queue=qn)(on_executing_remove_duplicates)
 
-        # prune the queue storage
-        executor.submit(_run_cleanup, qn)
-
-    # wait for the worker threads to start,
-    # not for the storage pruning tasks to finish
-    executor.shutdown(wait=True)
+        # add the thread to prune the queue storage
+        threads.add(_create_cleanup_worker(qn))
 
     return threads
 
