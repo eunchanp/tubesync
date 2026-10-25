@@ -650,7 +650,7 @@ class AttemptsTask(Task):
         if retry_backoff is None or 0 == retry_backoff:
             current_delay = getattr(self, '_retry_delay', initial_delay)
             return current_delay
-        elif algo_class and issubclass(algo_class, self.backoff_base_class):
+        elif algo_class and callable(getattr(algo_class, 'calculate', None)):
             # Always exceed the initial delay value
             while algo_class.calculate(attempt) <= initial_delay:
                 attempt += 1
