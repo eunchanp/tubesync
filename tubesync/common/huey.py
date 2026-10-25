@@ -226,6 +226,7 @@ class SqliteStorage(huey_SqliteStorage):
                         else:
                             self._cleanup_socket(sock, inputs_set)
                             set_mutated = True
+                    # ruff: ignore[BLE001]
                     except Exception:
                         self._cleanup_socket(sock, inputs_set)
                         set_mutated = True
@@ -280,6 +281,7 @@ class SqliteStorage(huey_SqliteStorage):
                 self._local.sock = sock
                 self._local.addr = current_addr
                 return sock
+            # ruff: ignore[BLE001]
             except Exception:
                 return None
 
@@ -309,6 +311,7 @@ class SqliteStorage(huey_SqliteStorage):
                 if sock:
                     try:
                         sock.sendall(b'w')
+                    # ruff: ignore[BLE001]
                     except Exception:
                         self._local.addr = None
                         with contextlib.suppress(Exception):
