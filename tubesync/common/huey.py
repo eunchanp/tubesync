@@ -700,7 +700,7 @@ def historical_task(signal_name, task_obj, exception_obj=None, /, *, huey=None):
     # ruff: ignore[RUF059]
     th, created = retry_django_db(5)(TaskHistory.objects.get_or_create)(
         task_id=str(task_obj.id),
-        name=f"{task_obj.__module__}.{task_obj.name}",
+        name=f'{task_obj.__module__}.{task_obj.name}',
         queue=huey.name,
     )
     th.priority = task_obj.priority
