@@ -67,7 +67,7 @@ TASKS = {
 }
 
 # Used by TASKS 'huey' backend
-HUEY = sqlite_tasks('tasks', thread=True, workers=0)
+HUEY = sqlite_tasks('tasks', thread=True, workers=0, blocking=True)
 HUEY['consumer']['verbose'] = True if DEBUG else None
 
 DJANGO_HUEY = {
