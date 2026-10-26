@@ -95,6 +95,7 @@ class SqliteStorage(huey_SqliteStorage):
         self._queued = threading.Semaphore(0)
         self._queued_lock = threading.Lock()
         self._serializer = Serializer()
+        self._stopping = threading.Event()
         self._storage_key = self.broker_settings.STORAGE_KEY_FMT.format(self.name)
         self.deserialize = self._serializer.deserialize
         self.serialize = self._serializer.serialize
@@ -184,86 +185,6 @@ class SqliteStorage(huey_SqliteStorage):
                 with contextlib.suppress(OSError):
                     sock.setsockopt(socket.IPPROTO_TCP, option, value)
 
-    def _get_primary_network_ip(self):
-        """Resolves the host's actual network interface IP address by checking
-        the routing table path to the secondary DNS anycast address.
-        """
-        with contextlib.suppress(Exception), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(('8.8.4.4', 53))
-            l_addr, _ =  s.getsockname()
-            return l_addr
-        return '127.0.0.1'
-
-    def _run_tcp_and_discovery_service(self):
-        """Binds globally to all interfaces and registers its discoverable multi-host location."""
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.bind(self.broker_settings.BIND_ADDR)
-
-        _, bound_port = server.getsockname()
-        server.listen(self.broker_settings.SOCKET_BACKLOG)
-
-        # Store the exact (ip, port) tuple directly using Huey's built-in serialization API
-        addr_tuple = (self._get_primary_network_ip(), bound_port)
-        self.put_data(self._storage_key, self.serialize(addr_tuple))
-        self.sock_broker.sendall(b'1')
-
-        inputs_set = {server}
-        set_mutated = True
-        while True:
-            if set_mutated:
-                cached_inputs_list = list(inputs_set)
-                set_mutated = False
-
-            readable, _, _ = select(cached_inputs_list, [], [], self.broker_settings.SELECT_TIMEOUT_SEC)
-
-            for sock in readable:
-                if sock is server:
-                    client, _ = sock.accept()
-                    self._configure_tcp_keepalive(client)
-                    inputs_set.add(client)
-                    set_mutated = True
-                else:
-                    try:
-                        if sock.recv(self.broker_settings.BUFFER_SIZE):
-                            self.sock_broker.sendall(b'1')
-                        else:
-                            self._cleanup_socket(sock, inputs_set)
-                            set_mutated = True
-                    # ruff: ignore[BLE001]
-                    except Exception:
-                        self._cleanup_socket(sock, inputs_set)
-                        set_mutated = True
-
-    def _unix_socket_handler(self):
-        """Wakes up instantly via the local Unix gate to re-balance capacities to true DB depth."""
-        first_time = r = True
-        while first_time or r:
-            if first_time:
-                first_time = False
-            else:
-                self.sock_consumer.recv(self.broker_settings.BUFFER_SIZE)
-
-            with self._queued_lock:
-                ready_tasks = self.queue_size()
-
-                # drain
-                while self._queued.acquire(blocking=False):
-                    pass
-
-                # refill
-                for _ in range(ready_tasks):
-                    self._queued.release()
-
-            r, _, _ = select([self.sock_consumer], [], [])
-
-    def _get_remote_broker_address(self):
-        """Fetches and unpacks the cached connection tuple from storage using Huey's native hooks."""
-        data = self.peek_data(self._storage_key)
-        if data:
-            with contextlib.suppress(Exception):
-                return self.deserialize(data)
-        return None
-
     def _get_pooled_socket(self, current_addr):
         """Manages thread-local socket reuse, ensuring configuration drift triggers updates safely."""
         cached_sock = getattr(self._local, 'sock', None)
@@ -290,6 +211,98 @@ class SqliteStorage(huey_SqliteStorage):
 
         return cached_sock
 
+    def _get_primary_network_ip(self):
+        """Resolves the host's actual network interface IP address by checking
+        the routing table path to the secondary DNS anycast address.
+        """
+        with contextlib.suppress(Exception), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(('8.8.4.4', 53))
+            l_addr, _ =  s.getsockname()
+            return l_addr
+        return '127.0.0.1'
+
+    def _get_remote_broker_address(self):
+        """Fetches and unpacks the cached connection tuple from storage using Huey's native hooks."""
+        data = self.peek_data(self._storage_key)
+        if data:
+            with contextlib.suppress(Exception):
+                return self.deserialize(data)
+        return None
+
+    def _run_tcp_and_discovery_service(self):
+        """Binds globally to all interfaces and registers its discoverable multi-host location."""
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(self.broker_settings.BIND_ADDR)
+
+        _, bound_port = server.getsockname()
+        server.listen(self.broker_settings.SOCKET_BACKLOG)
+
+        # Store the exact (ip, port) tuple directly using Huey's built-in serialization API
+        addr_tuple = (self._get_primary_network_ip(), bound_port)
+        self.put_data(self._storage_key, self.serialize(addr_tuple))
+        self.sock_broker.sendall(b'1')
+
+        inputs_set = {server}
+        set_mutated = True
+        while not self._stopping.is_set():
+            if set_mutated:
+                cached_inputs_list = list(inputs_set)
+                set_mutated = False
+
+            readable, _, _ = select(cached_inputs_list, [], [], self.broker_settings.SELECT_TIMEOUT_SEC)
+
+            for sock in readable:
+                if sock is server:
+                    client, _ = sock.accept()
+                    self._configure_tcp_keepalive(client)
+                    inputs_set.add(client)
+                    set_mutated = True
+                else:
+                    try:
+                        if sock.recv(self.broker_settings.BUFFER_SIZE):
+                            self.sock_broker.sendall(b'1')
+                        else:
+                            self._cleanup_socket(sock, inputs_set)
+                            set_mutated = True
+                    # ruff: ignore[BLE001]
+                    except Exception:
+                        self._cleanup_socket(sock, inputs_set)
+                        set_mutated = True
+        addr_tuple = ('0.0.0.0', bound_port)
+        self.put_data(self._storage_key, self.serialize(addr_tuple))
+        self.sock_broker.sendall(b'1')
+        cached_inputs_list = list(inputs_set)
+        for sock in cached_inputs_list:
+            self._cleanup_socket(sock, inputs_set)
+
+    def _unix_socket_handler(self):
+        """Wakes up instantly via the local Unix gate to re-balance capacities to true DB depth."""
+        first_time = r = True
+        while not self._stopping.is_set() and r:
+            if first_time:
+                first_time = False
+            else:
+                self.sock_consumer.recv(self.broker_settings.BUFFER_SIZE)
+
+            with self._queued_lock:
+                ready_tasks = self.queue_size()
+
+                # drain
+                while self._queued.acquire(blocking=False):
+                    pass
+
+                # refill
+                for _ in range(ready_tasks):
+                    self._queued.release()
+
+            r, _, _ = select([self.sock_consumer], [], [])
+        self._queued.release()
+
+    def close(self):
+        self._stopping.set()
+        self._queued.release()
+        return super().close()
+
     def dequeue(self):
         if not self.blocking:
             with self._queued_lock:
@@ -299,6 +312,8 @@ class SqliteStorage(huey_SqliteStorage):
             task = None
             try:
                 with self._queued_lock:
+                    if self._stopping.is_set():
+                        return task
                     task = super().dequeue()
                     if task is not None:
                         return task
@@ -310,23 +325,22 @@ class SqliteStorage(huey_SqliteStorage):
         with self._queued_lock:
             res = super().enqueue(*args, **kwargs)
 
-        if self.blocking:
-            addr = self._get_remote_broker_address()
-            if addr and '0.0.0.0' != addr[0]:
-                sock = self._get_pooled_socket(addr)
-                if sock:
-                    try:
-                        sock.sendall(b'w')
-                    # ruff: ignore[BLE001]
-                    except Exception:
-                        self._local.addr = None
-                        with contextlib.suppress(Exception):
-                            sock.close()
-                        self._local.sock = None
+        addr = self._get_remote_broker_address()
+        if addr and '0.0.0.0' != addr[0]:
+            sock = self._get_pooled_socket(addr)
+            if sock:
+                try:
+                    sock.sendall(b'w')
+                # ruff: ignore[BLE001]
+                except Exception:
+                    self._local.addr = None
+                    with contextlib.suppress(Exception):
+                        sock.close()
+                    self._local.sock = None
 
-                        if (retry_sock := self._get_pooled_socket(addr)):
-                            with contextlib.suppress(Exception):
-                                retry_sock.sendall(b'w')
+                    if (retry_sock := self._get_pooled_socket(addr)):
+                        with contextlib.suppress(Exception):
+                            retry_sock.sendall(b'w')
         return res
 
     def initialize_schema(self):
