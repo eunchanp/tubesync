@@ -214,7 +214,7 @@ class SqliteStorage(huey_SqliteStorage):
                 cached_inputs_list = list(inputs_set)
                 set_mutated = False
 
-            readable, _, _ = select.select(cached_inputs_list, [], [], self.broker_settings.SELECT_TIMEOUT_SEC)
+            readable, _, _ = select(cached_inputs_list, [], [], self.broker_settings.SELECT_TIMEOUT_SEC)
 
             for sock in readable:
                 if sock is server:
@@ -254,7 +254,7 @@ class SqliteStorage(huey_SqliteStorage):
                 for _ in range(ready_tasks):
                     self._queued.release()
 
-            r, _, _ = select.select([self.sock_consumer], [], [])
+            r, _, _ = select([self.sock_consumer], [], [])
 
     def _get_remote_broker_address(self):
         """Fetches and unpacks the cached connection tuple from storage using Huey's native hooks."""
@@ -292,20 +292,23 @@ class SqliteStorage(huey_SqliteStorage):
 
     def dequeue(self):
         if not self.blocking:
-            return super().dequeue()
+            with self._queued_lock:
+                return super().dequeue()
 
         while self._queued.acquire():
             task = None
             try:
-                task = super().dequeue()
-                if task is not None:
-                    return task
+                with self._queued_lock:
+                    task = super().dequeue()
+                    if task is not None:
+                        return task
             finally:
                 if task is None:
                     self._queued.release()
 
     def enqueue(self, *args, **kwargs):
-        res = super().enqueue(*args, **kwargs)
+        with self._queued_lock:
+            res = super().enqueue(*args, **kwargs)
 
         if self.blocking:
             addr = self._get_remote_broker_address()
@@ -430,8 +433,20 @@ class SqliteHuey(Huey):
     storage_class = SqliteStorage
 
     def create_consumer(self, **options):
-        self.storage_kwargs['blocking'] = (options.pop('blocking', False) is True)
-        if self.storage_kwargs['blocking']:
+        from django import settings
+        configs = list()
+        if (single := getattr(settings, 'HUEY', None)):
+            configs.append(single)
+        if (multiple := getattr(settings, 'DJANGO_HUEY', None)):
+            configs.extend(multiple.get('queues', {}).values())
+        try:
+            my_config = next(filter(lambda d: d.get('name') == self.name, configs))
+        except StopIteration:
+            pass
+        else:
+            self.storage_kwargs['blocking'] = my_config.get('consumer', {}).get('blocking') is True
+
+        if self.storage_kwargs['blocking'] and not self.storage.blocking:
             self.storage.close()
             self.storage = self.create_storage()
         return super().create_consumer(**options)
