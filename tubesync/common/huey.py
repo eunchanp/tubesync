@@ -13,6 +13,7 @@ from functools import partial
 from pathlib import Path
 from select import select
 from types import SimpleNamespace
+from typing import ClassVar
 
 from huey import (
     CancelExecution, Huey as huey_Huey,
@@ -48,7 +49,7 @@ TaskLock.acquired = property(
 class SqliteStorage(huey_SqliteStorage):
     begin_sql = 'BEGIN IMMEDIATE'
 
-    auto_vacuum_dict = {'NONE': 0, 'FULL': 1, 'INCREMENTAL': 2}
+    auto_vacuum_dict: ClassVar[dict[str, int]] = {'NONE': 0, 'FULL': 1, 'INCREMENTAL': 2}
     pragma_settings = SimpleNamespace(
         auto_vacuum = 'INCREMENTAL',
         journal_size_limit = 1024 * 1024 * 64,
