@@ -433,7 +433,7 @@ class SqliteHuey(Huey):
     storage_class = SqliteStorage
 
     def create_consumer(self, **options):
-        from django import settings
+        from django.conf import settings
         configs = list()
         if (single := getattr(settings, 'HUEY', None)):
             configs.append(single)
